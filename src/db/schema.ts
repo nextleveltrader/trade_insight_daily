@@ -482,68 +482,56 @@ export const posts = pgTable(
       .references(() => users.id, { onDelete: "restrict" }),
 
     // INTEGER — must match assets.id (serial). Bug #11 prevention.
+    // Note: Made nullable because some general market updates might not belong to a specific asset.
     assetId: integer("asset_id")
-      .notNull()
-      .references(() => assets.id, { onDelete: "restrict" }),
+      .references(() => assets.id, { onDelete: "set null" }),
+
+    // ── ⚡ Denormalization (Faster Feed Rendering) ──
+    assetName: text("asset_name"), // e.g. "EUR/USD" (No JOIN needed)
+    categoryName: text("category_name"), // e.g. "Forex" (No JOIN needed)
 
     type: postTypeEnum("type").notNull().default("ai_insight"),
     status: postStatusEnum("status").notNull().default("draft"),
 
-    // ── Standard content fields ──
+    // ── 📝 Standard content fields ──
     /** Display title (e.g. "EURUSD — Bearish Continuation Setup | April 15") */
     title: text("title").notNull(),
 
-    /**
-     * HTML body from TipTap editor (ICT posts) or AI-generated HTML (AI insights).
-     * Rendered directly in the feed card and insight detail view.
-     */
+    /** 🚀 NEW: SEO friendly URL identifier (e.g., "eurusd-bearish-continuation-setup") */
+    slug: text("slug").notNull().unique(),
+
+    /** 🚀 NEW: Short 2-line preview for the feed card. Saves massive bandwidth! */
+    summary: text("summary"),
+
+    /** HTML body from TipTap editor or AI. Rendered directly in the insight detail view. */
     body: text("body").notNull(),
 
-    // ── AI-generated / admin-set meta fields ──
-    /**
-     * Primary directional call — the most prominent data point on the feed card.
-     * AI-computed for ai_insight; admin-selected for ict_bias.
-     */
+    // ── 🤖 AI-generated / admin-set meta fields ──
     direction: directionEnum("direction"),
-
-    /**
-     * Granular tone / bias type.
-     * For most posts mirrors `direction`. Supports hawkish/dovish for F6 posts.
-     */
     biasType: biasTypeEnum("bias_type"),
-
-    /**
-     * AI confidence score: 0–100.
-     * Displayed as a progress bar on the feed card.
-     * For ICT posts: admin-entered qualitative confidence (50 / 75 / 100).
-     */
     confidence: integer("confidence"),
 
-    /**
-     * Gates the 24-hour unlock behaviour for ICT posts.
-     * true  → Premium-only until publishedAt + 24h, then unlocked for Free
-     * false → Available to Free immediately (AI insights)
-     */
     isProOnly: boolean("is_pro_only").notNull().default(false),
 
-    /**
-     * Populated when admin clicks "Publish" or when the engine cron publishes.
-     * NULL while status = 'draft'. Used for 24h ICT unlock arithmetic.
-     */
-    publishedAt: timestamp("published_at", { mode: "date" }),
+    // ── 🔍 🚀 NEW: SEO Meta Fields (For Google Ranking) ──
+    metaDescription: text("meta_description"),
+    metaKeywords: text("meta_keywords"),
 
-    // ── Audit ──
+    publishedAt: timestamp("published_at", { mode: "date" }),
+    
+    // ── 🕒 Audit ──
     createdAt: timestamp("created_at", { mode: "date" }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { mode: "date" }).notNull().defaultNow(),
   },
   (post) => ({
+    slugIdx: uniqueIndex("posts_slug_idx").on(post.slug), // 🚀 NEW: Fast URL routing
     userIdIdx: index("posts_user_id_idx").on(post.userId),
     assetIdIdx: index("posts_asset_id_idx").on(post.assetId),
     statusIdx: index("posts_status_idx").on(post.status),
     typeIdx: index("posts_type_idx").on(post.type),
-    /** Indexed for feed ordering and 24h unlock arithmetic */
     publishedAtIdx: index("posts_published_at_idx").on(post.publishedAt),
-    /** Composite index for the primary feed query: status + type + publishedAt */
+    
+    /** Composite index for the primary feed query */
     feedQueryIdx: index("posts_feed_query_idx").on(
       post.status,
       post.type,
