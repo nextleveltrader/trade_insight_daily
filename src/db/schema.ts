@@ -411,6 +411,13 @@ export const assets = pgTable(
   {
     id: serial("id").primaryKey(), // INTEGER — assetId FKs must be integer
 
+    // ── 🔗 Foreign Keys (CRITICAL) ──
+    // কোন ক্যাটাগরির আন্ডারে এই অ্যাসেটটি আছে (e.g., Forex, Crypto)
+    categoryId: integer("category_id")
+      .notNull()
+      .references(() => categories.id, { onDelete: "restrict" }),
+
+    // ── 📝 Core Info ──
     /** Full display name (e.g. "Euro / US Dollar", "Bitcoin") */
     name: text("name").notNull(),
 
@@ -419,19 +426,23 @@ export const assets = pgTable(
 
     type: assetTypeEnum("type").notNull(),
 
+    /** Denormalized category name for super-fast UI filtering without JOINs */
+    categoryName: text("category_name"),
+
     /** Optional short description shown in asset detail views */
     description: text("description"),
 
     /** Soft-delete flag — inactive assets are excluded from engine runs */
     isActive: boolean("is_active").notNull().default(true),
 
-    // ── Audit ──
+    // ── 🕒 Audit ──
     createdAt: timestamp("created_at", { mode: "date" }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { mode: "date" }).notNull().defaultNow(),
   },
   (asset) => ({
     tickerIdx: uniqueIndex("assets_ticker_idx").on(asset.ticker),
     typeIdx: index("assets_type_idx").on(asset.type),
+    categoryIdIdx: index("assets_category_id_idx").on(asset.categoryId), // ক্যাটাগরি দিয়ে দ্রুত খোঁজার জন্য
     isActiveIdx: index("assets_is_active_idx").on(asset.isActive),
   })
 );
@@ -714,3 +725,604 @@ export type PostType = (typeof postTypeEnum.enumValues)[number];
 export type PostStatus = (typeof postStatusEnum.enumValues)[number];
 export type Direction = (typeof directionEnum.enumValues)[number];
 export type BiasType = (typeof biasTypeEnum.enumValues)[number];
+
+
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// §7 — FEATURE ENUMS
+// Additional enums for Phase 1 foundation tables and Phase 3–7 feature tables.
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/** Shared impact vocabulary for Calendar and News features */
+export const impactLevelEnum = pgEnum("impact_level", [
+  "low",
+  "medium",
+  "high",
+]);
+
+/** GRI dashboard risk buckets */
+export const riskLevelEnum = pgEnum("risk_level", [
+  "low",
+  "medium",
+  "high",
+  "extreme",
+]);
+
+/** Article sentiment used by the News pipeline */
+export const newsSentimentEnum = pgEnum("news_sentiment", [
+  "positive",
+  "negative",
+  "neutral",
+]);
+
+/** Prompt lifecycle / scope grouping */
+export const promptScopeEnum = pgEnum("prompt_scope", [
+  "engine",
+  "calendar",
+  "cot",
+  "news",
+  "gri",
+  "correlation",
+  "speech",
+]);
+
+/** Correlation interpretation bucket for UI colouring and commentary */
+export const correlationStrengthEnum = pgEnum("correlation_strength", [
+  "strong_negative",
+  "weak_negative",
+  "neutral",
+  "weak_positive",
+  "strong_positive",
+]);
+
+/** Supported central bank institutions for the speech decoder */
+export const cbInstitutionEnum = pgEnum("cb_institution", [
+  "fed",
+  "ecb",
+  "boe",
+  "boj",
+  "rba",
+  "rbnz",
+  "boc",
+  "snb",
+]);
+
+/** Speech processing state */
+export const cbSpeechStatusEnum = pgEnum("cb_speech_status", [
+  "scheduled",
+  "live",
+  "completed",
+  "canceled",
+]);
+
+/** Restricted tone vocabulary for central bank speech decoding */
+export const speechToneEnum = pgEnum("speech_tone", [
+  "hawkish",
+  "dovish",
+  "neutral",
+]);
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// §8 — FOUNDATION TABLES (Missing From Phase 1)
+// categories + prompts
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/**
+ * categories — Admin-managed grouping for reusable prompt templates.
+ * Seeded once and reused across the AI engine and feature pipelines.
+ */
+export const categories = pgTable(
+  "categories",
+  {
+    id: serial("id").primaryKey(),
+
+    name: text("name").notNull(),
+    slug: text("slug").notNull(),
+    description: text("description"),
+
+    /** Lower values sort first in admin listings and seed output */
+    sortOrder: integer("sort_order").notNull().default(0),
+
+    isActive: boolean("is_active").notNull().default(true),
+
+    createdAt: timestamp("created_at", { mode: "date" }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { mode: "date" }).notNull().defaultNow(),
+  },
+  (category) => ({
+    slugIdx: uniqueIndex("categories_slug_idx").on(category.slug),
+    sortOrderIdx: index("categories_sort_order_idx").on(category.sortOrder),
+    isActiveIdx: index("categories_is_active_idx").on(category.isActive),
+  })
+);
+
+/**
+ * prompts — Versioned prompt templates used by the engine and feature pipelines.
+ * Kept in the database so admins can evolve prompt strategy without code edits.
+ */
+export const prompts = pgTable(
+  "prompts",
+  {
+    id: serial("id").primaryKey(),
+
+    // INTEGER — must match categories.id (serial).
+    categoryId: integer("category_id")
+      .notNull()
+      .references(() => categories.id, { onDelete: "restrict" }),
+
+    name: text("name").notNull(),
+    slug: text("slug").notNull(),
+    scope: promptScopeEnum("scope").notNull().default("engine"),
+
+    /** Optional short note describing where the prompt is used */
+    description: text("description"),
+
+    /** Split system and user templates for structured multi-model orchestration */
+    systemPrompt: text("system_prompt").notNull(),
+    userPrompt: text("user_prompt").notNull(),
+
+    /** Increment when a prompt is materially revised */
+    version: integer("version").notNull().default(1),
+
+    isActive: boolean("is_active").notNull().default(true),
+
+    createdAt: timestamp("created_at", { mode: "date" }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { mode: "date" }).notNull().defaultNow(),
+  },
+  (prompt) => ({
+    slugIdx: uniqueIndex("prompts_slug_idx").on(prompt.slug),
+    categoryIdIdx: index("prompts_category_id_idx").on(prompt.categoryId),
+    scopeIdx: index("prompts_scope_idx").on(prompt.scope),
+    isActiveIdx: index("prompts_is_active_idx").on(prompt.isActive),
+  })
+);
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// §9 — FEATURE TABLES (Phase 3–7)
+// Calendar, COT, News, GRI, Correlation, Central Bank Speeches
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/**
+ * economicEvents — Smart Economic Calendar source table.
+ * Stores the scheduled event plus the premium AI insight payload.
+ */
+export const economicEvents = pgTable(
+  "economic_events",
+  {
+    id: serial("id").primaryKey(),
+
+    // INTEGER — must match assets.id (serial).
+    assetId: integer("asset_id")
+      .notNull()
+      .references(() => assets.id, { onDelete: "restrict" }),
+
+    title: text("title").notNull(),
+    country: text("country").notNull(),
+    currency: text("currency").notNull(),
+    impactLevel: impactLevelEnum("impact_level").notNull(),
+
+    /** Optional upstream provider identifier for de-duplication */
+    sourceEventId: text("source_event_id"),
+
+    scheduledFor: timestamp("scheduled_for", { mode: "date" }).notNull(),
+
+    previousValue: text("previous_value"),
+    forecastValue: text("forecast_value"),
+    actualValue: text("actual_value"),
+
+    /** Plain-English explanation visible to Free users */
+    about: text("about"),
+
+    /** Premium AI section for trade setup commentary */
+    aiInsight: text("ai_insight"),
+
+    isActive: boolean("is_active").notNull().default(true),
+
+    createdAt: timestamp("created_at", { mode: "date" }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { mode: "date" }).notNull().defaultNow(),
+  },
+  (event) => ({
+    assetIdIdx: index("economic_events_asset_id_idx").on(event.assetId),
+    scheduledForIdx: index("economic_events_scheduled_for_idx").on(
+      event.scheduledFor
+    ),
+    impactLevelIdx: index("economic_events_impact_level_idx").on(
+      event.impactLevel
+    ),
+    isActiveIdx: index("economic_events_is_active_idx").on(event.isActive),
+    sourceEventIdIdx: uniqueIndex("economic_events_source_event_id_idx").on(
+      event.sourceEventId
+    ),
+  })
+);
+
+/**
+ * economicEventHistory — Historical release rows for a single economic event.
+ * Powers the event history block in the Smart Economic Calendar detail view.
+ */
+export const economicEventHistory = pgTable(
+  "economic_event_history",
+  {
+    id: serial("id").primaryKey(),
+
+    // INTEGER — must match economicEvents.id (serial).
+    eventId: integer("event_id")
+      .notNull()
+      .references(() => economicEvents.id, { onDelete: "cascade" }),
+
+    releasedAt: timestamp("released_at", { mode: "date" }).notNull(),
+
+    previousValue: text("previous_value"),
+    forecastValue: text("forecast_value"),
+    actualValue: text("actual_value"),
+    revisionValue: text("revision_value"),
+
+    /** Optional human-readable surprise summary */
+    surpriseSummary: text("surprise_summary"),
+
+    createdAt: timestamp("created_at", { mode: "date" }).notNull().defaultNow(),
+  },
+  (history) => ({
+    eventIdIdx: index("economic_event_history_event_id_idx").on(history.eventId),
+    releasedAtIdx: index("economic_event_history_released_at_idx").on(
+      history.releasedAt
+    ),
+    uniqueReleaseIdx: uniqueIndex("economic_event_history_event_release_idx").on(
+      history.eventId,
+      history.releasedAt
+    ),
+  })
+);
+
+/**
+ * cotReports — Weekly Commitment of Traders data snapshots per asset.
+ * Stores both the raw positioning numbers and the AI explanation.
+ */
+export const cotReports = pgTable(
+  "cot_reports",
+  {
+    id: serial("id").primaryKey(),
+
+    // INTEGER — must match assets.id (serial).
+    assetId: integer("asset_id")
+      .notNull()
+      .references(() => assets.id, { onDelete: "restrict" }),
+
+    reportDate: timestamp("report_date", { mode: "date" }).notNull(),
+
+    nonCommercialLong: integer("non_commercial_long").notNull(),
+    nonCommercialShort: integer("non_commercial_short").notNull(),
+    nonCommercialNet: integer("non_commercial_net").notNull(),
+
+    commercialLong: integer("commercial_long"),
+    commercialShort: integer("commercial_short"),
+    commercialNet: integer("commercial_net"),
+
+    openInterest: integer("open_interest"),
+
+    changeInLong: integer("change_in_long"),
+    changeInShort: integer("change_in_short"),
+    changeInNet: integer("change_in_net"),
+
+    /** Free-tier explanation */
+    summary: text("summary"),
+
+    /** Premium AI insight block */
+    aiInsight: text("ai_insight"),
+
+    createdAt: timestamp("created_at", { mode: "date" }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { mode: "date" }).notNull().defaultNow(),
+  },
+  (report) => ({
+    assetIdIdx: index("cot_reports_asset_id_idx").on(report.assetId),
+    reportDateIdx: index("cot_reports_report_date_idx").on(report.reportDate),
+    uniqueAssetReportIdx: uniqueIndex("cot_reports_asset_report_date_idx").on(
+      report.assetId,
+      report.reportDate
+    ),
+  })
+);
+
+/**
+ * newsArticles — News ingestion table for hourly / intraday article indexing.
+ * Supports one primary asset relation plus a raw ticker list for multi-asset news.
+ */
+export const newsArticles = pgTable(
+  "news_articles",
+  {
+    id: serial("id").primaryKey(),
+
+    // INTEGER — must match assets.id (serial).
+    assetId: integer("asset_id").references(() => assets.id, {
+      onDelete: "set null",
+    }),
+
+    source: text("source").notNull(),
+    title: text("title").notNull(),
+    url: text("url").notNull(),
+
+    summary: text("summary"),
+    body: text("body"),
+
+    impactLevel: impactLevelEnum("impact_level").notNull().default("medium"),
+    sentiment: newsSentimentEnum("sentiment").notNull().default("neutral"),
+
+    /** Comma-separated or JSON-stringified ticker list for cross-asset relevance */
+    relatedTickers: text("related_tickers"),
+
+    /** Premium AI significance explanation */
+    aiSignificance: text("ai_significance"),
+
+    publishedAt: timestamp("published_at", { mode: "date" }).notNull(),
+
+    createdAt: timestamp("created_at", { mode: "date" }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { mode: "date" }).notNull().defaultNow(),
+  },
+  (article) => ({
+    urlIdx: uniqueIndex("news_articles_url_idx").on(article.url),
+    assetIdIdx: index("news_articles_asset_id_idx").on(article.assetId),
+    impactLevelIdx: index("news_articles_impact_level_idx").on(
+      article.impactLevel
+    ),
+    sentimentIdx: index("news_articles_sentiment_idx").on(article.sentiment),
+    publishedAtIdx: index("news_articles_published_at_idx").on(
+      article.publishedAt
+    ),
+  })
+);
+
+/**
+ * griSnapshots — 15-minute Geopolitical Risk Indicator snapshots.
+ * Stores the computed score, bucket, and explanation shown on the GRI dashboard.
+ */
+export const griSnapshots = pgTable(
+  "gri_snapshots",
+  {
+    id: serial("id").primaryKey(),
+
+    /** Normalised 0–100 risk score */
+    score: integer("score").notNull(),
+    riskLevel: riskLevelEnum("risk_level").notNull(),
+
+    headlineCount: integer("headline_count").notNull().default(0),
+
+    /** Raw keyword summary from the weighted scan pipeline */
+    topKeywords: text("top_keywords"),
+
+    summary: text("summary"),
+    marketImpact: text("market_impact"),
+
+    snapshotAt: timestamp("snapshot_at", { mode: "date" }).notNull(),
+
+    createdAt: timestamp("created_at", { mode: "date" }).notNull().defaultNow(),
+  },
+  (snapshot) => ({
+    snapshotAtIdx: uniqueIndex("gri_snapshots_snapshot_at_idx").on(
+      snapshot.snapshotAt
+    ),
+    riskLevelIdx: index("gri_snapshots_risk_level_idx").on(snapshot.riskLevel),
+    scoreIdx: index("gri_snapshots_score_idx").on(snapshot.score),
+  })
+);
+
+/**
+ * correlationSnapshots — Daily Pearson correlation outputs for asset pairs.
+ * One row per pair per snapshot timestamp.
+ */
+export const correlationSnapshots = pgTable(
+  "correlation_snapshots",
+  {
+    id: serial("id").primaryKey(),
+
+    // INTEGER — must match assets.id (serial).
+    assetId: integer("asset_id")
+      .notNull()
+      .references(() => assets.id, { onDelete: "cascade" }),
+
+    // INTEGER — must match assets.id (serial).
+    relatedAssetId: integer("related_asset_id")
+      .notNull()
+      .references(() => assets.id, { onDelete: "cascade" }),
+
+    /** Rolling lookback window, e.g. 30-day OHLC */
+    windowDays: integer("window_days").notNull().default(30),
+
+    /** Pearson coefficient from -1.0000 to +1.0000 */
+    correlationCoefficient: decimal("correlation_coefficient", {
+      precision: 6,
+      scale: 4,
+    }).notNull(),
+
+    strength: correlationStrengthEnum("strength").notNull(),
+
+    /** Optional premium commentary on the relationship */
+    aiCommentary: text("ai_commentary"),
+
+    snapshotAt: timestamp("snapshot_at", { mode: "date" }).notNull(),
+
+    createdAt: timestamp("created_at", { mode: "date" }).notNull().defaultNow(),
+  },
+  (snapshot) => ({
+    assetIdIdx: index("correlation_snapshots_asset_id_idx").on(snapshot.assetId),
+    relatedAssetIdIdx: index("correlation_snapshots_related_asset_id_idx").on(
+      snapshot.relatedAssetId
+    ),
+    snapshotAtIdx: index("correlation_snapshots_snapshot_at_idx").on(
+      snapshot.snapshotAt
+    ),
+    uniquePairSnapshotIdx: uniqueIndex(
+      "correlation_snapshots_pair_snapshot_idx"
+    ).on(
+      snapshot.assetId,
+      snapshot.relatedAssetId,
+      snapshot.windowDays,
+      snapshot.snapshotAt
+    ),
+  })
+);
+
+/**
+ * cbSpeeches — Scheduled and processed central bank speeches.
+ * Holds the transcript, final summary, and the dominant decoded tone.
+ */
+export const cbSpeeches = pgTable(
+  "cb_speeches",
+  {
+    id: serial("id").primaryKey(),
+
+    // INTEGER — must match assets.id (serial).
+    assetId: integer("asset_id").references(() => assets.id, {
+      onDelete: "set null",
+    }),
+
+    institution: cbInstitutionEnum("institution").notNull(),
+    speaker: text("speaker").notNull(),
+    title: text("title").notNull(),
+
+    youtubeUrl: text("youtube_url").notNull(),
+
+    status: cbSpeechStatusEnum("status").notNull().default("scheduled"),
+
+    scheduledFor: timestamp("scheduled_for", { mode: "date" }).notNull(),
+    startedAt: timestamp("started_at", { mode: "date" }),
+    endedAt: timestamp("ended_at", { mode: "date" }),
+
+    transcript: text("transcript"),
+
+    /** Final post-speech summary for all authenticated users */
+    finalSummary: text("final_summary"),
+
+    dominantTone: speechToneEnum("dominant_tone"),
+    confidence: integer("confidence"),
+
+    createdAt: timestamp("created_at", { mode: "date" }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { mode: "date" }).notNull().defaultNow(),
+  },
+  (speech) => ({
+    youtubeUrlIdx: uniqueIndex("cb_speeches_youtube_url_idx").on(
+      speech.youtubeUrl
+    ),
+    assetIdIdx: index("cb_speeches_asset_id_idx").on(speech.assetId),
+    institutionIdx: index("cb_speeches_institution_idx").on(speech.institution),
+    statusIdx: index("cb_speeches_status_idx").on(speech.status),
+    scheduledForIdx: index("cb_speeches_scheduled_for_idx").on(
+      speech.scheduledFor
+    ),
+  })
+);
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// §10 — FEATURE RELATIONS
+// These relation blocks are append-safe and connect the new tables to the
+// existing schema without rewriting the current foundation relations.
+// ═══════════════════════════════════════════════════════════════════════════════
+
+export const categoriesRelations = relations(categories, ({ many }) => ({
+  prompts: many(prompts),
+}));
+
+export const promptsRelations = relations(prompts, ({ one }) => ({
+  category: one(categories, {
+    fields: [prompts.categoryId],
+    references: [categories.id],
+  }),
+}));
+
+export const economicEventsRelations = relations(
+  economicEvents,
+  ({ one, many }) => ({
+    asset: one(assets, {
+      fields: [economicEvents.assetId],
+      references: [assets.id],
+    }),
+    history: many(economicEventHistory),
+  })
+);
+
+export const economicEventHistoryRelations = relations(
+  economicEventHistory,
+  ({ one }) => ({
+    event: one(economicEvents, {
+      fields: [economicEventHistory.eventId],
+      references: [economicEvents.id],
+    }),
+  })
+);
+
+export const cotReportsRelations = relations(cotReports, ({ one }) => ({
+  asset: one(assets, {
+    fields: [cotReports.assetId],
+    references: [assets.id],
+  }),
+}));
+
+export const newsArticlesRelations = relations(newsArticles, ({ one }) => ({
+  asset: one(assets, {
+    fields: [newsArticles.assetId],
+    references: [assets.id],
+  }),
+}));
+
+export const correlationSnapshotsRelations = relations(
+  correlationSnapshots,
+  ({ one }) => ({
+    asset: one(assets, {
+      fields: [correlationSnapshots.assetId],
+      references: [assets.id],
+      relationName: "correlation_base_asset",
+    }),
+    relatedAsset: one(assets, {
+      fields: [correlationSnapshots.relatedAssetId],
+      references: [assets.id],
+      relationName: "correlation_related_asset",
+    }),
+  })
+);
+
+export const cbSpeechesRelations = relations(cbSpeeches, ({ one }) => ({
+  asset: one(assets, {
+    fields: [cbSpeeches.assetId],
+    references: [assets.id],
+  }),
+}));
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// §11 — TYPE EXPORTS
+// Inferred types for new tables and enums.
+// ═══════════════════════════════════════════════════════════════════════════════
+
+export type Category = typeof categories.$inferSelect;
+export type NewCategory = typeof categories.$inferInsert;
+
+export type Prompt = typeof prompts.$inferSelect;
+export type NewPrompt = typeof prompts.$inferInsert;
+
+export type EconomicEvent = typeof economicEvents.$inferSelect;
+export type NewEconomicEvent = typeof economicEvents.$inferInsert;
+
+export type EconomicEventHistory = typeof economicEventHistory.$inferSelect;
+export type NewEconomicEventHistory = typeof economicEventHistory.$inferInsert;
+
+export type CotReport = typeof cotReports.$inferSelect;
+export type NewCotReport = typeof cotReports.$inferInsert;
+
+export type NewsArticle = typeof newsArticles.$inferSelect;
+export type NewNewsArticle = typeof newsArticles.$inferInsert;
+
+export type GriSnapshot = typeof griSnapshots.$inferSelect;
+export type NewGriSnapshot = typeof griSnapshots.$inferInsert;
+
+export type CorrelationSnapshot = typeof correlationSnapshots.$inferSelect;
+export type NewCorrelationSnapshot = typeof correlationSnapshots.$inferInsert;
+
+export type CbSpeech = typeof cbSpeeches.$inferSelect;
+export type NewCbSpeech = typeof cbSpeeches.$inferInsert;
+
+export type ImpactLevel = (typeof impactLevelEnum.enumValues)[number];
+export type RiskLevel = (typeof riskLevelEnum.enumValues)[number];
+export type NewsSentiment = (typeof newsSentimentEnum.enumValues)[number];
+export type PromptScope = (typeof promptScopeEnum.enumValues)[number];
+export type CorrelationStrength =
+  (typeof correlationStrengthEnum.enumValues)[number];
+export type CbInstitution = (typeof cbInstitutionEnum.enumValues)[number];
+export type CbSpeechStatus = (typeof cbSpeechStatusEnum.enumValues)[number];
+export type SpeechTone = (typeof speechToneEnum.enumValues)[number];
